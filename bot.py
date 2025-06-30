@@ -7,21 +7,21 @@ from aiogram import Bot, Dispatcher, types, executor
 from pyrogram import Client
 
 # Aiogram setup
-BOT_TOKEN = "7390503914:AAH3611dk8xP-gAE3Iq5gSPjsO2xqAx-coI"  # Replace with your BOT_TOKEN
+BOT_TOKEN = "7390503914:AAFNopMlX6iNHO2HTWNYpLLzE_DfF8h4uQ4"  # Replace with your actual BotFather token
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
 # Pyrogram setup
-api_id = "29569239"   # Replace with your API ID
-api_hash = "b2407514e15f24c8ec2c735e8018acd7"  # Replace with your API HASH
-phone_number = "+254780855836"  # Replace with your phone number
+api_id = "29569239"   # Replace with your api_id
+api_hash = "b2407514e15f24c8ec2c735e8018acd7"  # Replace with your api_hash
+phone_number = "+254780855836"  # Replace with your Telegram account phone
 
 user_client = Client("my_account", api_id=api_id, api_hash=api_hash, phone_number=phone_number)
 
 scrape_queue = asyncio.Queue()
 
 # Admins and limits
-admin_ids = [5387926427,6922106594,7192604798,6572284023]
+admin_ids = [5387926427]  # Replace with your real Telegram user IDs
 default_limit = 100000
 admin_limit = 500000
 limits = {}  # For user-specific limits if needed
@@ -92,14 +92,19 @@ async def scrape_messages(user_client, channel_username, limit, start_number=Non
 async def process_scrape_queue(user_client, bot):
     while True:
         task = await scrape_queue.get()
-        # Unpack depending on presence of card_filter
         if len(task) == 5:
             message, channel_username, limit, start_number, temporary_msg = task
             card_filter = None
         else:
             message, channel_username, limit, start_number, temporary_msg, card_filter = task
 
-        scrapped_results = await scrape_messages(user_client, channel_username, limit, start_number, card_filter)
+        try:
+            scrapped_results = await scrape_messages(user_client, channel_username, limit, start_number, card_filter)
+        except Exception as e:
+            await temporary_msg.delete()
+            await bot.send_message(message.chat.id, f"❌ Scraping error: {str(e)}")
+            scrape_queue.task_done()
+            continue
 
         if scrapped_results:
             unique_messages, duplicates_removed = remove_duplicates(scrapped_results)
@@ -131,23 +136,57 @@ async def process_scrape_queue(user_client, bot):
         scrape_queue.task_done()
 
 def parse_channel_identifier(channel_identifier):
-    parsed_url = urlparse(channel_identifier)
-    if parsed_url.scheme and parsed_url.netloc:
-        # Looks like a URL
-        if parsed_url.path.startswith('/+'):
+    """Parse all formats: @username, username, channel_id, t.me links, joinchat links"""
+    channel_identifier = channel_identifier.strip()
+
+    # Handle full links
+    if channel_identifier.startswith("https://t.me/"):
+        id_part = channel_identifier.replace("https://t.me/", "")
+        # Handle joinchat/invite links
+        if id_part.startswith("joinchat/") or id_part.startswith("+"):
             return channel_identifier
-        elif parsed_url.path.startswith('/'):
-            return parsed_url.path.lstrip('/')
-    elif channel_identifier.isdigit():
+        # Remove @ for normal usernames
+        id_part = id_part.lstrip("@")
+        return id_part
+    # Handle @username
+    if channel_identifier.startswith("@"):
+        return channel_identifier[1:]
+    # Channel ID as integer
+    if channel_identifier.isdigit():
         return int(channel_identifier)
-    else:
-        return channel_identifier
+    # Joinchat raw string
+    if channel_identifier.startswith("joinchat/") or channel_identifier.startswith("+"):
+        return "https://t.me/" + channel_identifier
+    # Otherwise treat as plain username
+    return channel_identifier
+
+async def ensure_joined(user_client, channel_identifier):
+    """Join channel if it's a private invite link. Otherwise, just validate it."""
+    try:
+        # If it's a joinchat link, try to join
+        if (str(channel_identifier).startswith("https://t.me/joinchat/") or
+            str(channel_identifier).startswith("https://t.me/+")):
+            try:
+                chat = await user_client.join_chat(channel_identifier)
+                return chat.id
+            except Exception as e:
+                # Already participant is not fatal, try get_chat
+                if "USER_ALREADY_PARTICIPANT" in str(e):
+                    chat = await user_client.get_chat(channel_identifier)
+                    return chat.id
+                else:
+                    raise e
+        # For usernames/channel ids
+        chat = await user_client.get_chat(channel_identifier)
+        return chat.id if hasattr(chat, "id") else channel_identifier
+    except Exception as e:
+        raise e
 
 @dp.message_handler(commands=['start'])
 async def scr_cmd(message: types.Message):
     await bot.send_message(
         message.chat.id,
-        "<b>𝙷𝚎𝚕𝚕𝚘 𝚝𝚑𝚎𝚛𝚎! 𝚆𝚎𝚕𝚌𝚘𝚖𝚎 𝙲𝚌_𝚂𝚌𝚛𝚊𝚙𝚙𝚎𝚍_𝚟1\n"
+        "<b>𝙷𝚎𝚕𝚕𝚘! 𝚆𝚎𝚕𝚌𝚘𝚖𝚎 𝙲𝚌_𝚂𝚌𝚛𝚊𝚙𝚙𝚎𝚍_𝚟1\n"
         "Type /cmds for all available commands ✨</b>",
         parse_mode='html'
     )
@@ -162,6 +201,7 @@ async def cmds_cmd(message: types.Message):
         "/scr @examplechannel 100 AmericanExpress\n"
         "/scr 1234567890 50 Visa\n"
         "/scr https://t.me/examplechannel 20 4\n"
+        "/scr https://t.me/joinchat/XXXXXXXXXXX 50\n"
         "More tools & gateways coming soon!</b>",
         parse_mode='html'
     )
@@ -192,13 +232,13 @@ async def scr_cmd(message: types.Message):
 
     channel_username = parse_channel_identifier(channel_identifier)
 
-    # Try to ensure channel exists
+    # Try to ensure channel exists and join if needed
     try:
-        await user_client.get_chat(channel_username)
+        real_channel_id = await ensure_joined(user_client, channel_username)
     except Exception as e:
         await bot.send_message(
             message.chat.id,
-            "<b>Hey Bro! 🥲 Incorrect username or channel/link ❌</b>",
+            f"<b>Hey Bro! 🥲 Can't access this channel/group/link!<br><code>{str(e)}</code></b>",
             parse_mode='html'
         )
         return
